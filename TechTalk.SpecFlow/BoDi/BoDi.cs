@@ -15,6 +15,9 @@
  * 
  * Change history
  * 
+ * vNext
+ *   - Fix: Collection was modified issue (#7)
+ *
  * v1.3
  *   - Fix: When an object resolved without registration using the concrete type it cannot be resolved from sub context
  *   - Added IsRegistered methods to check if an interface or type is already registered (#6)
@@ -74,7 +77,7 @@ namespace BoDi
         }
     }
 
-    public interface IObjectContainer: IDisposable
+    public interface IObjectContainer : IDisposable
     {
         /// <summary>
         /// Fired when a new object is created directly by the container. It is not invoked for resolving instance and factory registrations.
@@ -129,7 +132,7 @@ namespace BoDi
         /// <typeparam name="TInterface">Interface to register as.</typeparam>
         /// <param name="factoryDelegate">The function to run to obtain the instance.</param>
         /// <param name="name">A name to resolve named instance, otherwise null.</param>
-        void RegisterFactoryAs<TInterface>(Func<IObjectContainer, TInterface> factoryDelegate, string name = null);
+        void RegisterFactoryAs<TInterface>(Func<IObjectContainer, TInterface> factoryDelegate, string name = null, bool dispose = false);
 
         /// <summary>
         /// Resolves an implementation object for an interface or type.
@@ -395,16 +398,22 @@ namespace BoDi
         private class FactoryRegistration : IRegistration
         {
             private readonly Delegate factoryDelegate;
+            private readonly bool dispose;
 
             public FactoryRegistration(Delegate factoryDelegate)
+                : this(factoryDelegate, false) { }
+
+            public FactoryRegistration(Delegate factoryDelegate, bool dispose)
             {
                 this.factoryDelegate = factoryDelegate;
+                this.dispose = dispose;
             }
 
             public object Resolve(ObjectContainer container, RegistrationKey keyToResolve, ResolutionList resolutionPath)
             {
-                //TODO: store result object in pool?
                 var obj = container.InvokeFactoryDelegate(factoryDelegate, resolutionPath, keyToResolve);
+                var objectKey = new RegistrationKey(obj.GetType(), keyToResolve.Name);
+                if (dispose) container.objectPool.Add(objectKey, obj);
                 return obj;
             }
         }
@@ -429,9 +438,9 @@ namespace BoDi
                 var genericArguments = typeToResolve.GetGenericArguments();
                 var keyType = genericArguments[0];
                 var targetType = genericArguments[1];
-                var result = (IDictionary)Activator.CreateInstance(typeof (Dictionary<,>).MakeGenericType(genericArguments));
+                var result = (IDictionary)Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(genericArguments));
 
-                foreach (var namedRegistration in container.registrations.Where(r => r.Key.Name != null && r.Key.Type == targetType).Select(r => r.Key))
+                foreach (var namedRegistration in container.registrations.Where(r => r.Key.Name != null && r.Key.Type == targetType).Select(r => r.Key).ToList())
                 {
                     var convertedKey = ChangeType(namedRegistration.Name, keyType);
                     Debug.Assert(convertedKey != null);
@@ -461,7 +470,7 @@ namespace BoDi
 
         public event Action<object> ObjectCreated;
 
-        public ObjectContainer(IObjectContainer baseContainer = null) 
+        public ObjectContainer(IObjectContainer baseContainer = null)
         {
             if (baseContainer != null && !(baseContainer is ObjectContainer))
                 throw new ArgumentException("Base container must be an ObjectContainer", "baseContainer");
@@ -487,7 +496,7 @@ namespace BoDi
 
         public void RegisterTypeAs(Type implementationType, Type interfaceType)
         {
-            if(!IsValidTypeMapping(implementationType, interfaceType))
+            if (!IsValidTypeMapping(implementationType, interfaceType))
                 throw new InvalidOperationException("type mapping is not valid");
             RegisterTypeAs(implementationType, interfaceType, null);
         }
@@ -568,22 +577,22 @@ namespace BoDi
             RegisterInstanceAs(instance, typeof(TInterface), name, dispose);
         }
 
-        public void RegisterFactoryAs<TInterface>(Func<TInterface> factoryDelegate, string name = null)
+        public void RegisterFactoryAs<TInterface>(Func<TInterface> factoryDelegate, string name = null, bool dispose = false)
         {
-            RegisterFactoryAs(factoryDelegate, typeof(TInterface), name);
+            RegisterFactoryAs(factoryDelegate, typeof(TInterface), name, dispose);
         }
 
-        public void RegisterFactoryAs<TInterface>(Func<IObjectContainer, TInterface> factoryDelegate, string name = null)
+        public void RegisterFactoryAs<TInterface>(Func<IObjectContainer, TInterface> factoryDelegate, string name = null, bool dispose = false)
         {
-            RegisterFactoryAs(factoryDelegate, typeof(TInterface), name);
+            RegisterFactoryAs(factoryDelegate, typeof(TInterface), name, dispose);
         }
 
-        public void RegisterFactoryAs<TInterface>(Delegate factoryDelegate, string name = null)
+        public void RegisterFactoryAs<TInterface>(Delegate factoryDelegate, string name = null, bool dispose = false)
         {
-            RegisterFactoryAs(factoryDelegate, typeof(TInterface), name);
+            RegisterFactoryAs(factoryDelegate, typeof(TInterface), name, dispose);
         }
 
-        public void RegisterFactoryAs(Delegate factoryDelegate, Type interfaceType, string name = null)
+        public void RegisterFactoryAs(Delegate factoryDelegate, Type interfaceType, string name = null, bool dispose = false)
         {
             if (factoryDelegate == null) throw new ArgumentNullException("factoryDelegate");
             if (interfaceType == null) throw new ArgumentNullException("interfaceType");
@@ -593,7 +602,7 @@ namespace BoDi
 
             ClearRegistrations(registrationKey);
 
-            AddRegistration(registrationKey, new FactoryRegistration(factoryDelegate));
+            AddRegistration(registrationKey, new FactoryRegistration(factoryDelegate, dispose));
         }
 
         public bool IsRegistered<T>()
@@ -679,7 +688,7 @@ namespace BoDi
         {
             return registrations
                 .Where(x => x.Key.Type == typeof(T))
-                .Select(x => Resolve (x.Key.Type, x.Key.Name) as T);
+                .Select(x => Resolve(x.Key.Type, x.Key.Name) as T);
         }
 
         private object Resolve(Type typeToResolve, ResolutionList resolutionPath, string name)
@@ -725,13 +734,13 @@ namespace BoDi
 
         private bool IsDefaultNamedInstanceDictionaryKey(RegistrationKey keyToResolve)
         {
-            return IsNamedInstanceDictionaryKey(keyToResolve) && 
+            return IsNamedInstanceDictionaryKey(keyToResolve) &&
                    keyToResolve.Type.GetGenericArguments()[0] == typeof(string);
         }
 
         private bool IsSpecialNamedInstanceDictionaryKey(RegistrationKey keyToResolve)
         {
-            return IsNamedInstanceDictionaryKey(keyToResolve) && 
+            return IsNamedInstanceDictionaryKey(keyToResolve) &&
                    keyToResolve.Type.GetGenericArguments()[0].IsEnum;
         }
 
@@ -771,7 +780,7 @@ namespace BoDi
             var registrationToUse = registrationResult ??
                 new KeyValuePair<ObjectContainer, IRegistration>(this, new TypeRegistration(keyToResolve.Type));
 
-            var resolutionPathForResolve = registrationToUse.Key == this ? 
+            var resolutionPathForResolve = registrationToUse.Key == this ?
                 resolutionPath : new ResolutionList();
             var result = registrationToUse.Value.Resolve(registrationToUse.Key, keyToResolve, resolutionPathForResolve);
             if (isImplicitTypeRegistration) // upon successful implicit registration, we register the rule, so that sub context can also get the same resolved value
@@ -838,7 +847,7 @@ namespace BoDi
 
         private bool IsRegisteredNameParameter(ParameterInfo parameterInfo)
         {
-            return parameterInfo.ParameterType == typeof (string) &&
+            return parameterInfo.ParameterType == typeof(string) &&
                    parameterInfo.Name.Equals(REGISTERED_NAME_PARAMETER_NAME);
         }
 
@@ -904,11 +913,11 @@ namespace BoDi
         public void Add(string implementationType, string interfaceType, string name = null)
         {
             BaseAdd(new ContainerRegistrationConfigElement
-                        {
-                            Implementation = implementationType,
-                            Interface = interfaceType,
-                            Name = name
-                        });
+            {
+                Implementation = implementationType,
+                Interface = interfaceType,
+                Name = name
+            });
         }
     }
 
